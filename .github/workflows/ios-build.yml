@@ -1,0 +1,230 @@
+
+name: Build iOS Calculator
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Create Xcode project configuration
+        run: |
+          cat > project.yml <<'EOF'
+          name: Calculator
+          options:
+            bundleIdPrefix: com.example
+            deploymentTarget:
+              iOS: "17.0"
+          targets:
+            Calculator:
+              type: application
+              platform: iOS
+              sources:
+                - Sources
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.example.Calculator
+                  PRODUCT_NAME: MyCalculator
+                  SWIFT_VERSION: "5.0"
+                  TARGETED_DEVICE_FAMILY: "1"
+                  INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+                  INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
+          EOF
+
+      - name: Create SwiftUI calculator
+        run: |
+          mkdir -p Sources
+          cat > Sources/CalculatorApp.swift <<'EOF'
+          import SwiftUI
+
+          @main
+          struct CalculatorApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      CalculatorView()
+                  }
+              }
+          }
+
+          struct CalculatorView: View {
+              @State private var display = "0"
+              @State private var storedValue: Double?
+              @State private var pendingOperation: String?
+              @State private var startsNewNumber = true
+
+              private let rows = [
+                  ["AC", "+/-", "%", "÷"],
+                  ["7", "8", "9", "×"],
+                  ["4", "5", "6", "−"],
+                  ["1", "2", "3", "+"],
+                  ["0", ".", "="]
+              ]
+
+              var body: some View {
+                  ZStack {
+                      Color.black.ignoresSafeArea()
+                      VStack(spacing: 12) {
+                          Spacer()
+                          HStack {
+                              Spacer()
+                              Text(display)
+                                  .font(.system(size: 64, weight: .light, design: .rounded))
+                                  .foregroundStyle(.white)
+                                  .lineLimit(1)
+                                  .minimumScaleFactor(0.35)
+                                  .contentTransition(.numericText())
+                          }
+                          .padding(.horizontal, 8)
+                          .padding(.bottom, 18)
+
+                          ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                              HStack(spacing: 12) {
+                                  ForEach(row, id: \.self) { key in
+                                      Button {
+                                          tap(key)
+                                      } label: {
+                                          Text(key)
+                                              .font(.system(size: 28, weight: .medium))
+                                              .frame(maxWidth: .infinity)
+                                              .frame(height: 76)
+                                              .background(color(for: key), in: Circle())
+                                              .foregroundStyle(textColor(for: key))
+                                      }
+                                      .buttonStyle(.plain)
+                                  }
+                                  if row.count == 3 {
+                                      Color.clear.frame(maxWidth: .infinity)
+                                  }
+                              }
+                          }
+                      }
+                      .padding(16)
+                  }
+                  .preferredColorScheme(.dark)
+              }
+
+              private func color(for key: String) -> Color {
+                  if ["÷", "×", "−", "+", "="].contains(key) {
+                      return Color.orange
+                  }
+                  if ["AC", "+/-", "%"].contains(key) {
+                      return Color(white: 0.68)
+                  }
+                  return Color(white: 0.23)
+              }
+
+              private func textColor(for key: String) -> Color {
+                  ["AC", "+/-", "%"].contains(key) ? .black : .white
+              }
+
+              private func tap(_ key: String) {
+                  switch key {
+                  case "0"..."9":
+                      if startsNewNumber || display == "Error" {
+                          display = key
+                          startsNewNumber = false
+                      } else if display.count < 12 {
+                          display += key
+                      }
+                  case ".":
+                      if startsNewNumber {
+                          display = "0."
+                          startsNewNumber = false
+                      } else if !display.contains(".") {
+                          display += "."
+                      }
+                  case "AC":
+                      display = "0"
+                      storedValue = nil
+                      pendingOperation = nil
+                      startsNewNumber = true
+                  case "+/-":
+                      if let value = Double(display) {
+                          display = format(-value)
+                      }
+                  case "%":
+                      if let value = Double(display) {
+                          display = format(value / 100)
+                      }
+                  case "+", "−", "×", "÷":
+                      if let value = Double(display) {
+                          if let stored = storedValue, let operation = pendingOperation, !startsNewNumber {
+                              let result = calculate(stored, value, operation)
+                              display = format(result)
+                              storedValue = result
+                          } else {
+                              storedValue = value
+                          }
+                          pendingOperation = key
+                          startsNewNumber = true
+                      }
+                  case "=":
+                      guard let stored = storedValue,
+                            let value = Double(display),
+                            let operation = pendingOperation else { return }
+                      let result = calculate(stored, value, operation)
+                      display = result.isFinite ? format(result) : "Error"
+                      storedValue = nil
+                      pendingOperation = nil
+                      startsNewNumber = true
+                  default:
+                      break
+                  }
+              }
+
+              private func calculate(_ lhs: Double, _ rhs: Double, _ operation: String) -> Double {
+                  switch operation {
+                  case "+": return lhs + rhs
+                  case "−": return lhs - rhs
+                  case "×": return lhs * rhs
+                  case "÷": return rhs == 0 ? .nan : lhs / rhs
+                  default: return rhs
+                  }
+              }
+
+              private func format(_ value: Double) -> String {
+                  guard value.isFinite else { return "Error" }
+                  if value == 0 { return "0" }
+                  return String(value)
+              }
+          }
+          EOF
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            -project Calculator.xcodeproj \
+            -scheme Calculator \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package simulator app
+        run: |
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/MyCalculator.app"
+          test -d "$APP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$RUNNER_TEMP/MyCalculator-Simulator.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyCalculator-iOS-Simulator
+          path: ${{ runner.temp }}/MyCalculator-Simulator.zip
+          if-no-files-found: error
+          retention-days: 7
